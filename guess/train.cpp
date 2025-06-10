@@ -2,7 +2,6 @@
 #include <fstream>
 #include <cctype>
 #include <algorithm>
-#include <cmath>
 
 // 这个文件里面的各函数你都不需要完全理解，甚至根本不需要看
 // 从学术价值上讲，加速模型的训练过程是一个没什么价值的问题，因为我们一般假定统计学模型的训练成本较低
@@ -136,90 +135,29 @@ void segment::insert(string value)
 }
 
 
-void segment::order(int n_smoothing_exponent)
+void segment::order()
 {
-    ordered_values.clear();
-    for (pair<string, int> value_pair : values) // 使用 value_pair 避免与成员 values 混淆
+    for (pair<string, int> value : values)
     {
-        ordered_values.emplace_back(value_pair.first);
+        ordered_values.emplace_back(value.first);
     }
-
-    if (ordered_values.empty()) {
-        total_freq = 0;
-        effective_container_size = 0;
-        ordered_freqs.clear();
-        return;
-    }
-
+    // cout << "value size:" << ordered_values.size() << endl;
     std::sort(ordered_values.begin(), ordered_values.end(),
               [this](const std::string &a, const std::string &b)
               {
-                  // 确保 freqs 和 values 包含对应的键
-                  auto it_a = values.find(a);
-                  auto it_b = values.find(b);
-                  if (it_a == values.end() || it_b == values.end()) {
-                      // 处理错误或返回默认排序
-                      return false; 
-                  }
-                  auto freq_it_a = freqs.find(it_a->second);
-                  auto freq_it_b = freqs.find(it_b->second);
-                  if (freq_it_a == freqs.end() || freq_it_b == freqs.end()) {
-                      // 处理错误或返回默认排序
-                      return false;
-                  }
-                  return freq_it_a->second > freq_it_b->second;
+                  return freqs.at(values[a]) > freqs.at(values[b]);
               });
 
-    ordered_freqs.clear();
-    total_freq = 0; // total_freq 将是原始频率的总和
-
+    // 将排序后的频率存入 ordered_freqs 并计算 total_freq
     for (const std::string &val : ordered_values)
     {
-        // ordered_freqs 初始填充原始频率，后续可能被平滑后的频率替换
-        ordered_freqs.emplace_back(freqs.at(values.at(val)));
-        total_freq += freqs.at(values.at(val));
+        ordered_freqs.emplace_back(freqs.at(values[val]));
+        total_freq += freqs.at(values[val]);
     }
-    // 移除之前代码中的重复循环
-
-    if (n_smoothing_exponent > 0 && !ordered_freqs.empty())
+    for (string val : ordered_values)
     {
-        int group_size = 1 << n_smoothing_exponent;
-        this->effective_container_size = group_size;
-
-        std::vector<int> smoothed_freqs;
-        smoothed_freqs.reserve(ordered_freqs.size());
-        
-        for (size_t i = 0; i < ordered_freqs.size(); i += group_size)
-        {
-            long long current_group_freq_sum = 0;
-            size_t current_group_actual_size = 0;
-            for (size_t j = 0; j < group_size && (i + j) < ordered_freqs.size(); ++j)
-            {
-                current_group_freq_sum += ordered_freqs[i + j];
-                current_group_actual_size++;
-            }
-
-            if (current_group_actual_size > 0)
-            {
-                // 论文提到“重新分配概率为组的平均概率”
-                // 这里我们存储平均频率；概率计算时 P = smoothed_freq / original_total_freq
-                int average_freq = static_cast<int>(round(static_cast<double>(current_group_freq_sum) / current_group_actual_size));
-                for (size_t j = 0; j < current_group_actual_size; ++j)
-                {
-                    // smoothed_freqs.push_back(average_freq); // 这会改变原始排序的频率对应关系
-                    // 应该直接修改 ordered_freqs 中对应位置的值
-                    if ((i + j) < ordered_freqs.size()) { // 确保不越界
-                        ordered_freqs[i+j] = average_freq;
-                    }
-                }
-            }
-        }
-        // ordered_freqs 现在包含了平滑后的频率
-        // total_freq 保持为原始总频率，用于概率计算 pt.prob /= segment.total_freq
-    } else if (!ordered_freqs.empty()) {
-        this->effective_container_size = ordered_values.size(); 
-    } else {
-        this->effective_container_size = 0;
+        ordered_freqs.emplace_back(freqs.at(values[val]));
+        total_freq += freqs.at(values[val]);
     }
 }
 
@@ -535,40 +473,31 @@ bool compareByPretermProb(const PT& a, const PT& b) {
 void model::order()
 {
     cout << "Training phase 2: Ordering segment values and PTs..." << endl;
-    for (PT& pt : preterminals) // 使用引用以修改原始数据
+    for (PT pt : preterminals)
     {
-        // FindPT 可能需要 const PT&，如果 preterminals 是 const vector<PT>
-        // 或者 FindPT(const_cast<const PT&>(pt))
-        // 假设 FindPT 可以接受 PT& 或者 preterminals 是 vector<PT>
-        int pt_idx = FindPT(pt);
-        if (pt_idx != -1 && preterm_freq.count(pt_idx) && total_preterm > 0) {
-             pt.preterm_prob = static_cast<float>(preterm_freq[pt_idx]) / total_preterm;
-        } else {
-             pt.preterm_prob = 0.0f;
-        }
+        pt.preterm_prob = float(preterm_freq[FindPT(pt)]) / total_preterm;
         ordered_pts.emplace_back(pt);
     }
-    // bool swapped; // 未使用
-    cout << "total pts before sort: " << ordered_pts.size() << endl; // 修改日志
+    bool swapped;
+    cout << "total pts" << ordered_pts.size() << endl;
     std::sort(ordered_pts.begin(), ordered_pts.end(), compareByPretermProb);
-    
-    int smoothing_n = 3; // 例如 n=3, 组大小为 8. 可以设为可配置参数
-    // 如果 smoothing_n = 0, 则不进行平滑
-
     cout << "Ordering letters" << endl;
+    // cout << "total letters" << endl;
     for (int i = 0; i < letters.size(); i += 1)
     {
-        letters[i].order(smoothing_n);
+        // cout << i << endl;
+        letters[i].order();
     }
     cout << "Ordering digits" << endl;
+    // cout << "total letters" << endl;
     for (int i = 0; i < digits.size(); i += 1)
     {
-        digits[i].order(smoothing_n);
+        digits[i].order();
     }
     cout << "ordering symbols" << endl;
+    // cout << "total letters" << endl;
     for (int i = 0; i < symbols.size(); i += 1)
     {
-        symbols[i].order(smoothing_n);
+        symbols[i].order();
     }
-    cout << "Training phase 2 finished." << endl; // 添加结束日志
 }

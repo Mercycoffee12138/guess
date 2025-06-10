@@ -3,7 +3,7 @@
 #include <unordered_map>
 #include <queue>
 #include <omp.h>
-#include<algorithm>
+#include <mpi.h>
 // #include <chrono>   
 // using namespace chrono;
 using namespace std;
@@ -30,9 +30,6 @@ public:
 
     // total_freq作为分母，用于计算每个value的概率
     int total_freq = 0;
-    int start_index;        // 在全局字典中的起始位置
-    int container_size;     // 容器大小（经过平滑处理后的大小）
-    int effective_container_size = 0; // 新增：平滑后的有效容器大小, 例如 2^n
 
     // 未排序的value，其中int就是对应的id
     unordered_map<string, int> values;
@@ -42,30 +39,9 @@ public:
 
 
     void insert(string value);
-    void order(int n_smoothing_exponent = 0);// 修改：增加平滑参数，0表示不平滑
+    void order();
     void PrintValues();
 };
-
-//PT存储结构优化
-struct OptimizedPT {
-    // Header data (24 bytes)
-    uint64_t offset;           // 8 bytes - 线程偏移量
-    uint64_t previous_guesses; // 8 bytes - 之前的猜测数量
-    uint8_t num_containers;    // 1 byte - 容器数量
-    uint64_t total_guesses;    // 7 bytes - 总猜测数量（使用7字节）
-    
-    // Body data (最多29个容器，每个8字节)
-    struct Container {
-        uint8_t type;          // 1 byte - 类型
-        uint8_t length;        // 1 byte - 长度  
-        uint8_t start_index;   // 1 byte - 起始索引
-        uint64_t container_size; // 5 bytes - 容器大小（使用5字节）
-    } containers[29];
-    
-    // 确保总大小为256字节
-    uint8_t padding[256 - 24 - 29*8];
-};
-
 
 class PT
 {
@@ -177,6 +153,9 @@ public:
     // 优先队列的初始化
     void init();
 
+    int mpi_rank;
+    int mpi_size;
+    void GenerateMPI(PT pt);
     // 对优先队列的一个PT，生成所有guesses
     void Generate(PT pt);
 
@@ -184,25 +163,13 @@ public:
     void PopNext();
     int total_guesses = 0;
     vector<string> guesses;
-};
 
-// 全局字典结构
-class GlobalDictionary {
-public:
-    vector<string> dictionary;              // 一维数组存储所有字符串
-    vector<vector<int>> starting_positions; // T×L数组存储起始位置
-    int max_types = 3;                      // 字母、数字、符号
-    int max_length = 32;                    // 最大长度限制
+    // 新增：PT层面的并行处理函数
+    void PopNextBatch(int batch_size = 4);
     
-    void BuildDictionary(const model& model);
-    int GetPosition(int type, int length, int rank);
-    string GetString(int position);
+    // 新增：处理单个PT并返回新生成的PT列表
+    vector<PT> ProcessSinglePT(PT pt);
+
+    void InsertNewPTs(const vector<PT>& new_pts);
+    void BroadcastPriorityQueue();
 };
-
-// 函数声明
-void ConvertToOptimizedPT(const PT& pt, OptimizedPT& opt_pt);
-void ApplySmoothingToSegment(segment& seg, int container_size);
-void ApplySmoothingTechnique(model& model, int n = 3);
-
-// 全局字典实例
-extern GlobalDictionary global_dict;

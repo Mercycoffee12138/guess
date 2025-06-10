@@ -1,81 +1,6 @@
 #include "PCFG.h"
+#include <algorithm>
 using namespace std;
-
-GlobalDictionary global_dict;
-
-int GetStringType(const string& str) {
-    if (str.empty()) return 0;
-    
-    bool has_letter = false;
-    bool has_digit = false;
-    bool has_symbol = false;
-    
-    for (char c : str) {
-        if (isalpha(c)) has_letter = true;
-        else if (isdigit(c)) has_digit = true;
-        else has_symbol = true;
-    }
-    
-    // 按照优先级返回类型：字母=0, 数字=1, 符号=2
-    if (has_letter) return 0;  // 字母类型优先
-    if (has_digit) return 1;   // 数字类型
-    return 2;                  // 符号类型
-}
-
-//全局字典实现
-void GlobalDictionary::BuildDictionary(const model& model) {
-    dictionary.clear();
-    starting_positions.assign(max_types, vector<int>(max_length + 1, -1));
-    
-    // 修改位置：实现三级排序原则
-    // 1. 按类型排序 (字母=0, 数字=1, 符号=2)
-    // 2. 按长度排序 (从短到长)
-    // 3. 按概率排序 (从高到低)
-    
-    vector<pair<string, double>> all_strings;
-    
-    // 收集所有字符串
-    for (const auto& seg : model.letters) {
-        for (size_t i = 0; i < seg.ordered_values.size(); ++i) {
-            all_strings.push_back({seg.ordered_values[i], seg.ordered_freqs[i]});
-        }
-    }
-    for (const auto& seg : model.digits) {
-        for (size_t i = 0; i < seg.ordered_values.size(); ++i) {
-            all_strings.push_back({seg.ordered_values[i], seg.ordered_freqs[i]});
-        }
-    }
-    for (const auto& seg : model.symbols) {
-        for (size_t i = 0; i < seg.ordered_values.size(); ++i) {
-            all_strings.push_back({seg.ordered_values[i], seg.ordered_freqs[i]});
-        }
-    }
-    
-    // 三级排序
-    sort(all_strings.begin(), all_strings.end(), [](const auto& a, const auto& b) {
-        int type_a = GetStringType(a.first);
-        int type_b = GetStringType(b.first);
-        
-        if (type_a != type_b) return type_a < type_b;
-        if (a.first.length() != b.first.length()) return a.first.length() < b.first.length();
-        return a.second > b.second; // 概率降序
-    });
-    
-    // 构建字典和起始位置表
-    int current_type = -1, current_length = -1;
-    for (size_t i = 0; i < all_strings.size(); ++i) {
-        int type = GetStringType(all_strings[i].first);
-        int length = all_strings[i].first.length();
-        
-        if (type != current_type || length != current_length) {
-            starting_positions[type][length] = dictionary.size();
-            current_type = type;
-            current_length = length;
-        }
-        
-        dictionary.push_back(all_strings[i].first);
-    }
-}
 
 void PriorityQueue::CalProb(PT &pt)
 {
@@ -128,63 +53,48 @@ void PriorityQueue::CalProb(PT &pt)
 
 void PriorityQueue::init()
 {
-    priority.clear(); 
-    for (const PT& pt_template_const : m.ordered_pts)
+    // cout << m.ordered_pts.size() << endl;
+    // 用所有可能的PT，按概率降序填满整个优先队列
+    for (PT pt : m.ordered_pts)
     {
-        PT pt = pt_template_const; 
-        pt.max_indices.clear();
-        pt.curr_indices.clear();
-
-        for (size_t i = 0; i < pt.content.size(); ++i)
+        for (segment seg : pt.content)
         {
-            const segment& seg_in_pt = pt.content[i]; 
-            const segment* model_seg_ptr = nullptr;   
+            if (seg.type == 1)
+            {
+                // 下面这行代码的意义：
+                // max_indices用来表示PT中各个segment的可能数目。例如，L6S1中，假设模型统计到了100个L6，那么L6对应的最大下标就是99
+                // （但由于后面采用了"<"的比较关系，所以其实max_indices[0]=100）
+                // m.FindLetter(seg): 找到一个letter segment在模型中的对应下标
+                // m.letters[m.FindLetter(seg)]：一个letter segment在模型中对应的所有统计数据
+                // m.letters[m.FindLetter(seg)].ordered_values：一个letter segment在模型中，所有value的总数目
+                pt.max_indices.emplace_back(m.letters[m.FindLetter(seg)].ordered_values.size());
+            }
+            if (seg.type == 2)
+            {
+                pt.max_indices.emplace_back(m.digits[m.FindDigit(seg)].ordered_values.size());
+            }
+            if (seg.type == 3)
+            {
+                pt.max_indices.emplace_back(m.symbols[m.FindSymbol(seg)].ordered_values.size());
+            }
+        }
+        pt.preterm_prob = float(m.preterm_freq[m.FindPT(pt)]) / m.total_preterm;
+        // pt.PrintPT();
+        // cout << " " << m.preterm_freq[m.FindPT(pt)] << " " << m.total_preterm << " " << pt.preterm_prob << endl;
 
-            if (seg_in_pt.type == 1) {
-                int model_idx = m.FindLetter(seg_in_pt);
-                if (model_idx != -1) model_seg_ptr = &m.letters[model_idx];
-            } else if (seg_in_pt.type == 2) {
-                int model_idx = m.FindDigit(seg_in_pt);
-                if (model_idx != -1) model_seg_ptr = &m.digits[model_idx];
-            } else if (seg_in_pt.type == 3) {
-                int model_idx = m.FindSymbol(seg_in_pt);
-                if (model_idx != -1) model_seg_ptr = &m.symbols[model_idx];
-            }
-
-            if (model_seg_ptr) {
-                // max_indices 存储模型中该 segment 的 ordered_values 的实际数量
-                pt.max_indices.emplace_back(model_seg_ptr->ordered_values.size());
-            } else {
-                pt.max_indices.emplace_back(0); 
-            }
-            
-            if (i < pt.content.size() - 1) {
-                pt.curr_indices.emplace_back(0);
-            }
-        }
-        
-        CalProb(pt); 
-        
-        // 保持优先队列有序（按概率降序）
-        bool inserted = false;
-        for (auto iter = priority.begin(); iter != priority.end(); ++iter) {
-            if (pt.prob > iter->prob) { 
-                priority.insert(iter, pt);
-                inserted = true;
-                break;
-            }
-        }
-        if (!inserted) {
-            priority.emplace_back(pt);
-        }
+        // 计算当前pt的概率
+        CalProb(pt);
+        // 将PT放入优先队列
+        priority.emplace_back(pt);
     }
+    // cout << "priority size:" << priority.size() << endl;
 }
 
 void PriorityQueue::PopNext()
 {
 
     // 对优先队列最前面的PT，首先利用这个PT生成一系列猜测
-    Generate(priority.front());
+    GenerateMPI(priority.front());
 
     // 然后需要根据即将出队的PT，生成一系列新的PT
     vector<PT> new_pts = priority.front().NewPTs();
@@ -267,204 +177,334 @@ vector<PT> PT::NewPTs()
     return res;
 }
 
-// PT转换函数
-void ConvertToOptimizedPT(const PT& pt, OptimizedPT& opt_pt) {
-    opt_pt.offset = 0; // 根据实际情况设置
-    opt_pt.previous_guesses = 0; // 根据实际情况设置
-    opt_pt.num_containers = pt.content.size();
-    opt_pt.total_guesses = 1;
-    
-    for (int i = 0; i < pt.content.size(); ++i) {
-        opt_pt.containers[i].type = pt.content[i].type;
-        opt_pt.containers[i].length = pt.content[i].length;
-        opt_pt.containers[i].start_index = pt.content[i].start_index;
-        opt_pt.containers[i].container_size = pt.content[i].container_size;
-        opt_pt.total_guesses *= opt_pt.containers[i].container_size;
-    }
-}
 
 // 这个函数是PCFG并行化算法的主要载体
 // 尽量看懂，然后进行并行实现
 void PriorityQueue::Generate(PT pt)
 {
-    if (pt.content.empty() || pt.max_indices.empty()) return;
+    // 计算PT的概率，这里主要是给PT的概率进行初始化
+    CalProb(pt);
 
-    //使用优化的存储结构
-    OptimizedPT opt_pt;
-    ConvertToOptimizedPT(pt, opt_pt);
-    
-    int num_threads_to_target = 32; // 例如，一个 warp 的大小
-
-    // 使用Formula 1计算Guess ID
-    auto calculateGuessId = [&](int thread_id, int pt_id) -> int {
-        int guess_id = (thread_id - opt_pt.offset + num_threads_to_target) % num_threads_to_target;
-        // 添加整数倍的线程数
-        int n = 0;
-        while (guess_id + n * num_threads_to_target <= opt_pt.total_guesses) {
-            n++;
-        }
-        return guess_id + (n - 1) * num_threads_to_target;
-    };
-    
-    // 使用Algorithm 2进行特定字符串识别
-    auto calculateStringIndices = [&](int guess_id) -> vector<int> {
-        vector<int> str_indices(opt_pt.num_containers);
-        int container_id = opt_pt.num_containers - 1;
-        
-        while (container_id >= 0) {
-            int mod = guess_id % opt_pt.containers[container_id].container_size;
-            if (mod == 0) {
-                mod = opt_pt.containers[container_id].container_size;
-            }
-            guess_id = (guess_id + opt_pt.containers[container_id].container_size - 1) / 
-                       opt_pt.containers[container_id].container_size;
-            str_indices[container_id] = mod;
-            container_id--;
-        }
-        return str_indices;
-    };
-
-
+    // 对于只有一个segment的PT，直接遍历生成其中的所有value即可
     if (pt.content.size() == 1)
     {
-        const segment& single_seg_template = pt.content[0];
-        segment* model_segment_ptr = nullptr; // 使用非 const 指针，因为 segment 成员不是都为 const
-
-        if (single_seg_template.type == 1) {
-            int model_idx = m.FindLetter(single_seg_template);
-            if (model_idx != -1) model_segment_ptr = &m.letters[model_idx];
-        } else if (single_seg_template.type == 2) {
-            int model_idx = m.FindDigit(single_seg_template);
-            if (model_idx != -1) model_segment_ptr = &m.digits[model_idx];
-        } else if (single_seg_template.type == 3) {
-            int model_idx = m.FindSymbol(single_seg_template);
-            if (model_idx != -1) model_segment_ptr = &m.symbols[model_idx];
+        // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
+        segment *a;
+        // 在模型中定位到这个segment
+        if (pt.content[0].type == 1)
+        {
+            a = &m.letters[m.FindLetter(pt.content[0])];
         }
-
-        if (!model_segment_ptr || model_segment_ptr->ordered_values.empty()) return;
-
-        size_t actual_values_count = model_segment_ptr->ordered_values.size();
-        if (actual_values_count == 0) return;
-
-        size_t iterations_for_loop = actual_values_count;
-        bool repeat_values = false;
-        // 如果实际值数量小于目标线程数，并且我们希望每个线程都有工作（通过重复值）
-        if (actual_values_count < num_threads_to_target) {
-             iterations_for_loop = num_threads_to_target; // 循环这么多次以生成足够猜测
-             repeat_values = true;
+        if (pt.content[0].type == 2)
+        {
+            a = &m.digits[m.FindDigit(pt.content[0])];
+        }
+        if (pt.content[0].type == 3)
+        {
+            a = &m.symbols[m.FindSymbol(pt.content[0])];
         }
         
-        #pragma omp parallel
+        // Multi-thread TODO：
+        // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
+        // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
+        // 这个过程是可以高度并行化的
+        for (int i = 0; i < pt.max_indices[0]; i += 1)
         {
-            vector<string> thread_local_guesses;
-            #pragma omp for schedule(static)
-            for (int i = 0; i < iterations_for_loop; ++i) {
-                string guess;
-                if (repeat_values) {
-                    guess = model_segment_ptr->ordered_values[i % actual_values_count];
-                } else {
-                    // iterations_for_loop == actual_values_count
-                    guess = model_segment_ptr->ordered_values[i];
-                }
-                thread_local_guesses.emplace_back(guess);
-            }
-            
-            #pragma omp critical
-            {
-                guesses.insert(guesses.end(), make_move_iterator(thread_local_guesses.begin()), make_move_iterator(thread_local_guesses.end()));
-            }
+            string guess = a->ordered_values[i];
+            // cout << guess << endl;
+            guesses.emplace_back(guess);
+            total_guesses += 1;
         }
     }
-    else // pt.content.size() > 1
+    else
     {
-        // 修改位置：多段情况下使用优化算法
-        #pragma omp parallel
+        string guess;
+        int seg_idx = 0;
+        // 这个for循环的作用：给当前PT的所有segment赋予实际的值（最后一个segment除外）
+        // segment值根据curr_indices中对应的值加以确定
+        // 这个for循环你看不懂也没太大问题，并行算法不涉及这里的加速
+        for (int idx : pt.curr_indices)
         {
-            vector<string> thread_local_guesses;
-            #pragma omp for schedule(static)
-            for (int thread_id = 0; thread_id < opt_pt.total_guesses; ++thread_id) {
-                int guess_id = calculateGuessId(thread_id, 0);
-                if (guess_id > opt_pt.total_guesses) continue;
-                
-                vector<int> str_indices = calculateStringIndices(guess_id);
-                
-                string complete_guess;
-                for (int container_idx = 0; container_idx < opt_pt.num_containers; ++container_idx) {
-                    int position = global_dict.GetPosition(
-                        opt_pt.containers[container_idx].type,
-                        opt_pt.containers[container_idx].length,
-                        opt_pt.containers[container_idx].start_index + str_indices[container_idx] - 1
-                    );
-                    complete_guess += global_dict.GetString(position);
-                }
-                
-                thread_local_guesses.emplace_back(complete_guess);
-            }
-            
-            #pragma omp critical
+            if (pt.content[seg_idx].type == 1)
             {
-                guesses.insert(guesses.end(), 
-                             make_move_iterator(thread_local_guesses.begin()), 
-                             make_move_iterator(thread_local_guesses.end()));
+                guess += m.letters[m.FindLetter(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 2)
+            {
+                guess += m.digits[m.FindDigit(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 3)
+            {
+                guess += m.symbols[m.FindSymbol(pt.content[seg_idx])].ordered_values[idx];
+            }
+            seg_idx += 1;
+            if (seg_idx == pt.content.size() - 1)
+            {
+                break;
+            }
+        }
+
+        // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
+        segment *a;
+        if (pt.content[pt.content.size() - 1].type == 1)
+        {
+            a = &m.letters[m.FindLetter(pt.content[pt.content.size() - 1])];
+        }
+        if (pt.content[pt.content.size() - 1].type == 2)
+        {
+            a = &m.digits[m.FindDigit(pt.content[pt.content.size() - 1])];
+        }
+        if (pt.content[pt.content.size() - 1].type == 3)
+        {
+            a = &m.symbols[m.FindSymbol(pt.content[pt.content.size() - 1])];
+        }
+        
+        // Multi-thread TODO：
+        // 这个for循环就是你需要进行并行化的主要部分了，特别是在多线程&GPU编程任务中
+        // 可以看到，这个循环本质上就是把模型中一个segment的所有value，赋值到PT中，形成一系列新的猜测
+        // 这个过程是可以高度并行化的
+        for (int i = 0; i < pt.max_indices[pt.content.size() - 1]; i += 1)
+        {
+            string temp = guess + a->ordered_values[i];
+            // cout << temp << endl;
+            guesses.emplace_back(temp);
+            total_guesses += 1;
+        }
+    }
+}
+
+void PriorityQueue::GenerateMPI(PT pt)
+{
+    // 计算PT的概率，这里主要是给PT的概率进行初始化
+    CalProb(pt);
+
+    // 对于只有一个segment的PT，直接遍历生成其中的所有value即可
+    if (pt.content.size() == 1)
+    {
+        // 指向最后一个segment的指针，这个指针实际指向模型中的统计数据
+        segment *a;
+        // 在模型中定位到这个segment
+        if (pt.content[0].type == 1)
+        {
+            a = &m.letters[m.FindLetter(pt.content[0])];
+        }
+        if (pt.content[0].type == 2)
+        {
+            a = &m.digits[m.FindDigit(pt.content[0])];
+        }
+        if (pt.content[0].type == 3)
+        {
+            a = &m.symbols[m.FindSymbol(pt.content[0])];
+        }
+        
+        // MPI并行化：将工作分配给不同进程
+        int total_values = pt.max_indices[0];
+        int values_per_process = total_values / mpi_size;
+        int remainder = total_values % mpi_size;
+        
+        int start_idx = mpi_rank * values_per_process + min(mpi_rank, remainder);
+        int end_idx = start_idx + values_per_process + (mpi_rank < remainder ? 1 : 0);
+        
+        // 每个进程处理自己的部分
+        for (int i = start_idx; i < end_idx; i++)
+        {
+            string guess = a->ordered_values[i];
+            guesses.emplace_back(guess);
+            total_guesses += 1;
+        }
+    }
+    else
+    {
+        string guess;
+        int seg_idx = 0;
+        // 这个for循环的作用：给当前PT的所有segment赋予实际的值（最后一个segment除外）
+        for (int idx : pt.curr_indices)
+        {
+            if (pt.content[seg_idx].type == 1)
+            {
+                guess += m.letters[m.FindLetter(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 2)
+            {
+                guess += m.digits[m.FindDigit(pt.content[seg_idx])].ordered_values[idx];
+            }
+            if (pt.content[seg_idx].type == 3)
+            {
+                guess += m.symbols[m.FindSymbol(pt.content[seg_idx])].ordered_values[idx];
+            }
+            seg_idx += 1;
+            if (seg_idx == pt.content.size() - 1)
+            {
+                break;
+            }
+        }
+
+        // 指向最后一个segment的指针
+        segment *a;
+        if (pt.content[pt.content.size() - 1].type == 1)
+        {
+            a = &m.letters[m.FindLetter(pt.content[pt.content.size() - 1])];
+        }
+        if (pt.content[pt.content.size() - 1].type == 2)
+        {
+            a = &m.digits[m.FindDigit(pt.content[pt.content.size() - 1])];
+        }
+        if (pt.content[pt.content.size() - 1].type == 3)
+        {
+            a = &m.symbols[m.FindSymbol(pt.content[pt.content.size() - 1])];
+        }
+        
+        // MPI并行化：将工作分配给不同进程
+        int total_values = pt.max_indices[pt.content.size() - 1];
+        int values_per_process = total_values / mpi_size;
+        int remainder = total_values % mpi_size;
+        
+        int start_idx = mpi_rank * values_per_process + min(mpi_rank, remainder);
+        int end_idx = start_idx + values_per_process + (mpi_rank < remainder ? 1 : 0);
+        
+        // 每个进程处理自己的部分
+        for (int i = start_idx; i < end_idx; i++)
+        {
+            string temp = guess + a->ordered_values[i];
+            guesses.emplace_back(temp);
+            total_guesses += 1;
+        }
+    }
+}
+
+void PriorityQueue::PopNextBatch(int batch_size)
+{
+    // 修复min函数调用
+    int actual_batch_size = min(batch_size, min((int)priority.size(), mpi_size));
+    
+    if (actual_batch_size == 0) return;
+    
+    // 每个进程分配的PT索引
+    vector<int> pt_indices_per_process(mpi_size, -1);
+    vector<PT> pts_to_process(mpi_size);
+    
+    // 主进程分配PT给各进程
+    if (mpi_rank == 0) {
+        for (int i = 0; i < actual_batch_size && i < mpi_size; i++) {
+            pt_indices_per_process[i] = i;
+            pts_to_process[i] = priority[i];
+        }
+    }
+    
+    // 广播分配信息到所有进程
+    MPI_Bcast(pt_indices_per_process.data(), mpi_size, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    // 广播PT数据到各进程（简化实现：每个进程接收所有PT，但只处理分配给自己的）
+    for (int i = 0; i < actual_batch_size; i++) {
+        if (mpi_rank == 0) {
+            // 这里简化处理，实际应该序列化PT对象
+            // 为了工程实现，假设所有进程都有相同的优先队列副本
+        }
+    }
+    
+    // 各进程处理分配给自己的PT
+    vector<PT> new_pts_from_this_process;
+    
+    if (pt_indices_per_process[mpi_rank] != -1 && mpi_rank < actual_batch_size) {
+        // 当前进程需要处理PT
+        PT assigned_pt = priority[pt_indices_per_process[mpi_rank]];
+        new_pts_from_this_process = ProcessSinglePT(assigned_pt);
+    }
+    
+    // 收集所有进程生成的新PT数量
+    int local_new_pts_count = new_pts_from_this_process.size();
+    vector<int> all_new_pts_counts(mpi_size);
+    MPI_Allgather(&local_new_pts_count, 1, MPI_INT, 
+                  all_new_pts_counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    
+    // 计算总的新PT数量
+    int total_new_pts = 0;
+    for (int count : all_new_pts_counts) {
+        total_new_pts += count;
+    }
+    
+    // 收集所有新生成的PT（简化：在主进程中处理）
+    if (mpi_rank == 0) {
+        // 移除已处理的PT
+        for (int i = actual_batch_size - 1; i >= 0; i--) {
+            priority.erase(priority.begin() + i);
+        }
+        
+        // 将新PT插入优先队列（简化处理）
+        for (int proc = 0; proc < mpi_size; proc++) {
+            if (pt_indices_per_process[proc] != -1) {
+                // 这里需要从其他进程接收新PT，简化为本地处理
+                if (proc == 0 && !new_pts_from_this_process.empty()) {
+                    InsertNewPTs(new_pts_from_this_process);
+                }
             }
         }
     }
+    
+    // 同步优先队列状态（简化：重新广播）
+    BroadcastPriorityQueue();
 }
 
-
-// 添加平滑技术的辅助函数
-void ApplySmoothingToSegment(segment& seg, int container_size) {
-    // 将相同类型和长度的字符串分组
-    int num_groups = (seg.ordered_values.size() + container_size - 1) / container_size;
+// 处理单个PT并返回新生成的PT列表
+vector<PT> PriorityQueue::ProcessSinglePT(PT pt)
+{
+    // 生成密码猜测
+    GenerateMPI(pt);
     
-    for (int group = 0; group < num_groups; ++group) {
-        int start_idx = group * container_size;
-        int end_idx = min(start_idx + container_size, (int)seg.ordered_values.size());
-        
-        // 计算平均概率
-        double avg_prob = 0.0;
-        for (int i = start_idx; i < end_idx; ++i) {
-            avg_prob += seg.ordered_freqs[i];
+    // 生成新的PT
+    vector<PT> new_pts = pt.NewPTs();
+    
+    // 计算新PT的概率
+    for (PT& new_pt : new_pts) {
+        CalProb(new_pt);
+    }
+    
+    return new_pts;
+}
+
+// 将新PT插入优先队列的辅助函数
+void PriorityQueue::InsertNewPTs(const vector<PT>& new_pts)
+{
+    for (const PT& pt : new_pts) {
+        // 按概率插入到正确位置
+        bool inserted = false;
+        for (auto iter = priority.begin(); iter != priority.end(); iter++) {
+            if (iter != priority.end() - 1 && iter != priority.begin()) {
+                if (pt.prob <= iter->prob && pt.prob > (iter + 1)->prob) {
+                    priority.emplace(iter + 1, pt);
+                    inserted = true;
+                    break;
+                }
+            }
+            if (iter == priority.end() - 1) {
+                priority.emplace_back(pt);
+                inserted = true;
+                break;
+            }
+            if (iter == priority.begin() && iter->prob < pt.prob) {
+                priority.emplace(iter, pt);
+                inserted = true;
+                break;
+            }
         }
-        avg_prob /= (end_idx - start_idx);
-        
-        // 重新分配概率
-        for (int i = start_idx; i < end_idx; ++i) {
-            seg.ordered_freqs[i] = avg_prob;
+        if (!inserted && priority.empty()) {
+            priority.emplace_back(pt);
         }
     }
-    
-    seg.container_size = container_size;
 }
 
-// 添加平滑技术实现
-void ApplySmoothingTechnique(model& model, int n) {
-    int container_size = 1 << n; // 2^n
+// 广播优先队列状态的辅助函数（简化实现）
+void PriorityQueue::BroadcastPriorityQueue()
+{
+    // 广播优先队列大小
+    int queue_size = priority.size();
+    MPI_Bcast(&queue_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
     
-    for (auto& seg : model.letters) {
-        ApplySmoothingToSegment(seg, container_size);
-    }
-    for (auto& seg : model.digits) {
-        ApplySmoothingToSegment(seg, container_size);
-    }
-    for (auto& seg : model.symbols) {
-        ApplySmoothingToSegment(seg, container_size);
-    }
-}
-
-int GlobalDictionary::GetPosition(int type, int length, int rank) {
-    if (type >= max_types || length > max_length || 
-        starting_positions[type][length] == -1) {
-        return -1;
+    // 非主进程调整队列大小
+    if (mpi_rank != 0) {
+        priority.resize(queue_size);
     }
     
-    int start_pos = starting_positions[type][length];
-    return start_pos + rank;
-}
-
-string GlobalDictionary::GetString(int position) {
-    if (position < 0 || position >= dictionary.size()) {
-        return "";
-    }
-    return dictionary[position];
+    // 这里应该序列化和广播PT对象，简化处理
+    // 实际实现中需要将PT对象序列化为字节流进行传输
 }
